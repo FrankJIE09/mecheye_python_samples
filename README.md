@@ -1,5 +1,7 @@
 # Mech-Eye API Python Samples
+## Download DEB file first.
 
+### https://downloads.mech-mind.com/?tab=tab-sdk
 Here you can find the Mech-Eye API Python samples for different Mech-Eye products:
 
 - **area_scan_3d_camera**: samples for Mech-Eye Industrial 3D Camera
