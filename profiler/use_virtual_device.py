@@ -125,8 +125,5 @@ class UseVirtualDevice(object):
 
 
 if __name__ == '__main__':
-    try:
-        a = UseVirtualDevice()
-        a.main()
-    except IOError as error:
-        print(error)
+    a = UseVirtualDevice()
+    a.main()

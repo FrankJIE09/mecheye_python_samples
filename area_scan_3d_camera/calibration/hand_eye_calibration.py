@@ -22,10 +22,7 @@ def get_input_int(min: int, max: int, warning_message: str):
 def get_input_float():
     while True:
         user_input = input()
-        try:
-            return float(user_input)
-        except:
-            print("Please enter a number.")
+        return float(user_input)
 
 
 def show_and_save_image(image, file_name: str, window_name: str):
