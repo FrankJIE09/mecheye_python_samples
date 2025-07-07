@@ -16,6 +16,19 @@ from dataclasses import dataclass
 from pathlib import Path
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    print("警告: pandas未安装，Excel保存功能将不可用")
+
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    print("警告: tqdm未安装，进度条显示将不可用")
 
 from mecheye.shared import *
 from mecheye.area_scan_3d_camera import *
@@ -25,9 +38,9 @@ from mecheye.area_scan_3d_camera_utils import find_and_connect
 class NumpyEncoder(json.JSONEncoder):
     """ 自定义编码器，用于处理Numpy数据类型 """
     def default(self, obj):
-        if isinstance(obj, np.integer):
+        if hasattr(obj, 'dtype') and obj.dtype.kind in 'iu':  # integer types
             return int(obj)
-        elif isinstance(obj, np.floating):
+        elif hasattr(obj, 'dtype') and obj.dtype.kind == 'f':  # float types
             return float(obj)
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
@@ -54,10 +67,10 @@ class MechEyeCameraTester:
         self.results_dir = Path("test_results")
         self.results_dir.mkdir(exist_ok=True)
         self.test_params = {
-            'frame_rate_test_duration': 500,
-            'repeatability_test_count': 500,
-            'stability_test_duration': 1000,
-            'noise_test_count': 500,
+            'frame_rate_test_duration': 0,
+            'repeatability_test_count': 100,
+            'stability_test_duration': 0,
+            'noise_test_count': 0,
         }
     
     def setup_camera(self) -> bool:
@@ -68,6 +81,21 @@ class MechEyeCameraTester:
         else:
             self.logger.error("相机连接失败")
             return False
+    
+    def capture_single_frame(self):
+        """捕获单帧深度图像"""
+        try:
+            frame_2d_and_3d = Frame2DAnd3D()
+            self.camera.capture_2d_and_3d(frame_2d_and_3d)
+            frame_3d = frame_2d_and_3d.frame_3d()
+            depth_map = frame_3d.get_depth_map()
+            if depth_map:
+                return depth_map.data()
+            else:
+                return None
+        except Exception as e:
+            self.logger.error(f"捕获深度图像失败: {e}")
+            return None
     
     def run_test(self, test_func, test_name: str, **kwargs) -> TestResult:
         """运行单个测试"""
@@ -160,56 +188,228 @@ class MechEyeCameraTester:
         }
     
     def test_repeatability(self) -> Dict:
-        """重复精度测试，宽松风格"""
+        """重复精度测试 - 多点测试
+        注意：MechEye相机的深度数据本身就是毫米(mm)单位，无需比例因子转换
+        """
         count = self.test_params['repeatability_test_count']
-        point_clouds = []
-        center_points = []
-        selected_points = []
+        target_points = 25  # 目标测试点数
+        depth_maps = []
+        all_test_points = []  # 存储所有测试点的数据
         success_count = 0
-        self.logger.info(f"开始重复精度测试，测试次数: {count}")
+
+        self.logger.info(f"开始重复精度测试，测试次数: {count}，目标测试点数: {target_points}")
+
+        # 首先获取一帧来确定有效区域和采样点
+        initial_depth = self.capture_single_frame()
+        if initial_depth is None:
+            return {'error': '无法获取初始深度图像'}
+
+        # 计算有效区域
+        valid_mask = (initial_depth > 0) & (initial_depth < 65535)
+        if not np.any(valid_mask):
+            return {'error': '未找到有效深度区域'}
+
+        valid_coords = np.where(valid_mask)
+        
+        # 在有效区域内均匀采样点
+        if len(valid_coords[0]) >= target_points:
+            # 随机选择目标数量的点
+            indices = np.random.choice(len(valid_coords[0]), target_points, replace=False)
+            test_y_coords = valid_coords[0][indices]
+            test_x_coords = valid_coords[1][indices]
+        else:
+            # 如果有效点不够，使用所有有效点
+            test_y_coords = valid_coords[0]
+            test_x_coords = valid_coords[1]
+            target_points = len(test_y_coords)
+            self.logger.warning(f"有效点数量不足，使用所有 {target_points} 个有效点")
+
+        self.logger.info(f"选择了 {target_points} 个测试点")
+
+        # 为每个测试点创建数据存储
+        point_data = {i: [] for i in range(target_points)}
+
+        # 使用tqdm显示进度（如果可用）
+        if TQDM_AVAILABLE:
+            progress_bar = tqdm(total=count, desc="重复精度测试", unit="次", ncols=80)
+        else:
+            progress_bar = None
+            
         for i in range(count):
-            frame_2d_and_3d = Frame2DAnd3D()
-            self.camera.capture_2d_and_3d(frame_2d_and_3d)
-            frame_3d = frame_2d_and_3d.frame_3d()
-            point_cloud = frame_3d.get_untextured_point_cloud()
-            if point_cloud:
-                pc_np = point_cloud.data()
-                if pc_np.ndim == 3:
-                    pc_np = pc_np.reshape(-1, pc_np.shape[-1])
-                valid_points = pc_np[~np.isnan(pc_np).any(axis=1)]
-                valid_points = valid_points[~np.isinf(valid_points).any(axis=1)]
-                if len(valid_points) > 0:
-                    center = np.mean(valid_points, axis=0)
-                    center_points.append(center)
-                    point_clouds.append(pc_np)
-                    if len(valid_points) >= 20:
-                        indices = np.linspace(0, len(valid_points)-1, 20, dtype=int)
-                        selected_pts = valid_points[indices]
-                        selected_points.append(selected_pts)
-                    else:
-                        selected_points.append(valid_points)
-                    success_count += 1
-                else:
-                    self.logger.warning(f"第{i+1}次点云无有效点")
+            # 在每次拍照前等待1秒，确保获取新图像
+            time.sleep(1)
+            
+            # 捕获深度图像
+            depth_data = self.capture_single_frame()
+
+            if depth_data is not None:
+                # 记录每个测试点的深度值
+                for j in range(target_points):
+                    y, x = test_y_coords[j], test_x_coords[j]
+                    if 0 <= y < depth_data.shape[0] and 0 <= x < depth_data.shape[1]:
+                        depth_value = depth_data[y, x]
+                        if depth_value > 0 and depth_value < 65535:
+                            # 深度数据本身就是毫米单位，不需要比例因子转换
+                            depth_mm = depth_value  # 直接使用原始值，单位已经是毫米
+                            point_data[j].append(depth_mm)
+
+                depth_maps.append(depth_data)
+                success_count += 1
+
+                self.logger.debug(f"重复精度测试进度: {i + 1}/{count}")
             else:
-                self.logger.warning(f"第{i+1}次点云为空")
-            time.sleep(0.5)
-        if len(center_points) < 2:
-            return {'error': '有效数据不足，无法计算重复精度'}
-        center_points = np.array(center_points)
-        selected_points = np.array(selected_points)
-        mean_center = np.mean(center_points, axis=0)
-        std_center = np.std(center_points, axis=0)
-        max_deviation = np.max(np.linalg.norm(center_points - mean_center, axis=1))
-        print(f"Repeatability test: max deviation = {max_deviation:.3f} mm")
+                self.logger.warning(f"第{i + 1}次拍摄失败")
+
+            # 更新进度条
+            if progress_bar:
+                progress_bar.update(1)
+                progress_bar.set_postfix({
+                    '成功': success_count,
+                    '成功率': f"{success_count/(i+1)*100:.1f}%"
+                })
+            else:
+                print(f"进度: {i+1}/{count}, 成功: {success_count}")
+        
+        if progress_bar:
+            progress_bar.close()
+
+        # 分析每个测试点的重复精度
+        point_analysis = []
+        valid_points = 0
+
+        for i in range(target_points):
+            if len(point_data[i]) >= 2:  # 至少需要2个有效测量值
+                # 现在point_data[i]只包含深度值
+                try:
+                    depths = np.array(point_data[i], dtype=np.float64)
+                    
+                    # 计算该点的统计信息
+                    mean_depth = np.mean(depths)
+                    std_depth = np.std(depths)
+                    max_depth_deviation = np.max(np.abs(depths - mean_depth))
+                    depth_range = np.max(depths) - np.min(depths)
+                    
+                    point_analysis.append({
+                        'point_id': i,
+                        'coordinates': [test_x_coords[i], test_y_coords[i]],
+                        'measurement_count': len(depths),
+                        'mean_depth': mean_depth,
+                        'std_depth': std_depth,
+                        'max_depth_deviation': max_depth_deviation,
+                        'depth_range': depth_range
+                    })
+                    valid_points += 1
+                except Exception as e:
+                    self.logger.warning(f"处理测试点 {i} 时出错: {e}")
+                    continue
+
+        if valid_points == 0:
+            return {'error': '没有足够的有效测试点数据'}
+
+        # 计算整体统计
+        all_depth_stds = [p['std_depth'] for p in point_analysis]
+        all_depth_deviations = [p['max_depth_deviation'] for p in point_analysis]
+        all_depth_ranges = [p['depth_range'] for p in point_analysis]
+        
+        overall_stats = {
+            'mean_depth_std': np.mean(all_depth_stds),
+            'std_depth_std': np.std(all_depth_stds),
+            'max_depth_std': np.max(all_depth_stds),
+            'mean_depth_deviation': np.mean(all_depth_deviations),
+            'std_depth_deviation': np.std(all_depth_deviations),
+            'max_depth_deviation': np.max(all_depth_deviations),
+            'mean_depth_range': np.mean(all_depth_ranges),
+            'std_depth_range': np.std(all_depth_ranges)
+        }
+
+        # 保存数据到Excel
+        self.save_repeatability_excel(point_data, point_analysis, overall_stats, count)
+
         return {
             'test_count': count,
             'success_count': success_count,
-            'max_deviation': max_deviation,
-            'mean_center': mean_center.tolist(),
-            'std_center': std_center.tolist(),
-            'center_points': center_points.tolist()
+            'success_rate': success_count / count,
+            'target_points': target_points,
+            'valid_points': valid_points,
+            'overall_stats': overall_stats,
+            'point_analysis': point_analysis,
+            'test_point_coordinates': [[test_x_coords[i], test_y_coords[i]] for i in range(target_points)],
+            'raw_depth_data': point_data  # 保存每个点的原始深度数据
         }
+    
+    def save_repeatability_excel(self, point_data: Dict, point_analysis: List, overall_stats: Dict, test_count: int):
+        """保存重复精度测试数据到Excel文件"""
+        if not PANDAS_AVAILABLE:
+            self.logger.warning("pandas未安装，无法保存Excel文件")
+            return None
+            
+        timestamp = int(time.time())
+        excel_filename = f"repeatability_test_{timestamp}.xlsx"
+        excel_filepath = self.results_dir / excel_filename
+        
+        try:
+            # 创建Excel写入器
+            with pd.ExcelWriter(excel_filepath, engine='openpyxl') as writer:
+                
+                # 1. 原始数据表
+                raw_data_rows = []
+                for point_id, depths in point_data.items():
+                    for measurement_idx, depth in enumerate(depths):
+                        raw_data_rows.append({
+                            'Point_ID': point_id,
+                            'Measurement_Index': measurement_idx + 1,
+                            'Depth_mm': depth
+                        })
+                
+                if raw_data_rows:
+                    raw_df = pd.DataFrame(raw_data_rows)
+                    raw_df.to_excel(writer, sheet_name='Raw_Data', index=False)
+                
+                # 2. 点分析表
+                if point_analysis:
+                    analysis_rows = []
+                    for point in point_analysis:
+                        analysis_rows.append({
+                            'Point_ID': point['point_id'],
+                            'X_Coordinate': point['coordinates'][0],
+                            'Y_Coordinate': point['coordinates'][1],
+                            'Measurement_Count': point['measurement_count'],
+                            'Mean_Depth_mm': point['mean_depth'],
+                            'Std_Depth_mm': point['std_depth'],
+                            'Max_Deviation_mm': point['max_depth_deviation'],
+                            'Depth_Range_mm': point['depth_range']
+                        })
+                    
+                    analysis_df = pd.DataFrame(analysis_rows)
+                    analysis_df.to_excel(writer, sheet_name='Point_Analysis', index=False)
+                
+                # 3. 整体统计表
+                stats_rows = []
+                for key, value in overall_stats.items():
+                    stats_rows.append({
+                        'Statistic': key,
+                        'Value': value
+                    })
+                
+                stats_df = pd.DataFrame(stats_rows)
+                stats_df.to_excel(writer, sheet_name='Overall_Statistics', index=False)
+                
+                # 4. 测试信息表
+                info_rows = [
+                    {'Parameter': 'Test_Count', 'Value': test_count},
+                    {'Parameter': 'Target_Points', 'Value': len(point_data)},
+                    {'Parameter': 'Valid_Points', 'Value': len(point_analysis)},
+                    {'Parameter': 'Test_Date', 'Value': time.strftime('%Y-%m-%d %H:%M:%S')}
+                ]
+                
+                info_df = pd.DataFrame(info_rows)
+                info_df.to_excel(writer, sheet_name='Test_Info', index=False)
+            
+            self.logger.info(f"重复精度测试数据已保存到Excel: {excel_filepath}")
+            return excel_filepath
+        except Exception as e:
+            self.logger.error(f"保存Excel文件失败: {e}")
+            return None
     
     def test_stability(self) -> Dict:
         """稳定性测试，宽松风格"""

@@ -1,2 +1,5 @@
 MechEyeAPI
 numpy
+pandas
+openpyxl
+tqdm

@@ -32,6 +32,7 @@ __pycache__/
 .vscode/
 *.sublime-*
 /install_dir/epiceye-searchtool_1.0.1_amd64.deb
+test_results/*
 
 # ������־�ļ�
 # ������ʱ�ļ�
