@@ -67,10 +67,10 @@ class MechEyeCameraTester:
         self.results_dir = Path("test_results")
         self.results_dir.mkdir(exist_ok=True)
         self.test_params = {
-            'frame_rate_test_duration': 0,
+            'frame_rate_test_duration': 1,
             'repeatability_test_count': 100,
-            'stability_test_duration': 0,
-            'noise_test_count': 0,
+            'stability_test_duration': 1,
+            'noise_test_count': 1,
         }
     
     def setup_camera(self) -> bool:
@@ -596,7 +596,7 @@ class MechEyeCameraTester:
             self.camera.get_camera_info(info)
             ip = getattr(info, 'ip_address', None)
             f.write(f"相机IP: {ip}\n\n")
-            
+
             # 测试参数
             f.write("## 测试参数\n\n")
             for key, value in self.test_params.items():

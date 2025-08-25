@@ -24,15 +24,18 @@ plt.rcParams['axes.unicode_minus'] = False
 class ExcelPrecisionCalculator:
     """Excel表格重复定位精度计算器"""
     
-    def __init__(self, excel_file: str):
+    def __init__(self, excel_file: str, max_distance_mm: float = 1000.0):
         """
         初始化计算器
         
         Args:
             excel_file: Excel文件路径
+            max_distance_mm: 最大距离阈值（毫米），只分析此距离内的点
         """
         self.excel_file = excel_file
+        self.max_distance_mm = max_distance_mm
         self.data = None
+        self.filtered_data = None
         self.results = {}
         
     def load_data(self) -> bool:
@@ -42,47 +45,86 @@ class ExcelPrecisionCalculator:
             print(f"成功加载Excel文件: {self.excel_file}")
             print(f"数据形状: {self.data.shape}")
             print(f"列名: {list(self.data.columns)}")
+            
+            # 过滤1000mm内的点
+            self.filter_data_by_distance()
             return True
         except Exception as e:
             print(f"加载Excel文件失败: {e}")
             return False
     
+    def filter_data_by_distance(self) -> None:
+        """根据距离过滤数据，只保留1000mm内的点"""
+        if self.data is None:
+            return
+        
+        # 计算每个点到原点的距离
+        if all(col in self.data.columns for col in ['X', 'Y', 'Depth_mm']):
+            # 使用3D坐标计算距离
+            distances = np.sqrt(self.data['X']**2 + self.data['Y']**2 + self.data['Depth_mm']**2)
+        elif 'Depth_mm' in self.data.columns:
+            # 只使用Z坐标（深度）作为距离
+            distances = np.abs(self.data['Depth_mm'])
+        else:
+            print("警告：无法找到坐标列，将使用所有数据")
+            self.filtered_data = self.data
+            return
+        
+        # 过滤1000mm内的点
+        mask = distances <= self.max_distance_mm
+        self.filtered_data = self.data[mask].copy()
+        
+        print(f"\n=== 距离过滤结果 ===")
+        print(f"原始数据点数: {len(self.data)}")
+        print(f"过滤后点数: {len(self.filtered_data)}")
+        print(f"过滤掉的点数: {len(self.data) - len(self.filtered_data)}")
+        print(f"距离阈值: {self.max_distance_mm} mm")
+        
+        if len(self.filtered_data) == 0:
+            print("警告：过滤后没有数据点，请检查距离阈值设置")
+        else:
+            print(f"保留数据比例: {len(self.filtered_data)/len(self.data)*100:.1f}%")
+    
     def analyze_data_structure(self) -> Dict:
         """分析数据结构"""
-        if self.data is None:
+        if self.filtered_data is None:
             return {}
         
         analysis = {
-            'total_rows': len(self.data),
-            'columns': list(self.data.columns),
-            'frame_count': self.data['Measurement_Index'].nunique() if 'Measurement_Index' in self.data.columns else 0,
-            'point_count': self.data['Point_ID'].nunique() if 'Point_ID' in self.data.columns else 0,
-            'has_coordinates': all(col in self.data.columns for col in ['X', 'Y', 'Depth_mm']),
-            'data_types': self.data.dtypes.to_dict()
+            'total_rows': len(self.filtered_data),
+            'original_rows': len(self.data) if self.data is not None else 0,
+            'columns': list(self.filtered_data.columns),
+            'frame_count': self.filtered_data['Measurement_Index'].nunique() if 'Measurement_Index' in self.filtered_data.columns else 0,
+            'point_count': self.filtered_data['Point_ID'].nunique() if 'Point_ID' in self.filtered_data.columns else 0,
+            'has_coordinates': all(col in self.filtered_data.columns for col in ['X', 'Y', 'Depth_mm']),
+            'data_types': self.filtered_data.dtypes.to_dict(),
+            'max_distance_threshold': self.max_distance_mm
         }
         
-        print("\n=== 数据结构分析 ===")
-        print(f"总行数: {analysis['total_rows']}")
+        print("\n=== 数据结构分析（1000mm内） ===")
+        print(f"原始总行数: {analysis['original_rows']}")
+        print(f"过滤后行数: {analysis['total_rows']}")
         print(f"帧数: {analysis['frame_count']}")
         print(f"每帧点数: {analysis['point_count']}")
         print(f"包含坐标: {analysis['has_coordinates']}")
+        print(f"距离阈值: {self.max_distance_mm} mm")
         
         return analysis
     
     def calculate_center_point_precision(self) -> Dict:
         """计算中心点Z方向重复定位精度"""
-        if self.data is None or 'Depth_mm' not in self.data.columns:
+        if self.filtered_data is None or 'Depth_mm' not in self.filtered_data.columns:
             return {'error': '数据格式不正确，需要Z列'}
         
         # 检查是否有像素坐标列，如果有则按像素坐标分组计算中心点
-        if '像素坐标X' in self.data.columns and '像素坐标Y' in self.data.columns:
+        if '像素坐标X' in self.filtered_data.columns and '像素坐标Y' in self.filtered_data.columns:
             # 按像素坐标分组计算中心点Z坐标
             center_z_values = []
             frame_numbers = []
             
             # 按帧分组
-            for frame_id in self.data['Measurement_Index'].unique():
-                frame_data = self.data[self.data['Measurement_Index'] == frame_id]
+            for frame_id in self.filtered_data['Measurement_Index'].unique():
+                frame_data = self.filtered_data[self.filtered_data['Measurement_Index'] == frame_id]
                 center_z = frame_data['Depth_mm'].mean()
                 center_z_values.append(center_z)
                 frame_numbers.append(frame_id)
@@ -91,8 +133,8 @@ class ExcelPrecisionCalculator:
             center_z_values = []
             frame_numbers = []
             
-            for frame_id in self.data['Measurement_Index'].unique():
-                frame_data = self.data[self.data['Measurement_Index'] == frame_id]
+            for frame_id in self.filtered_data['Measurement_Index'].unique():
+                frame_data = self.filtered_data[self.filtered_data['Measurement_Index'] == frame_id]
                 center_z = frame_data['Depth_mm'].mean()
                 center_z_values.append(center_z)
                 frame_numbers.append(frame_id)
@@ -135,15 +177,15 @@ class ExcelPrecisionCalculator:
     
     def calculate_selected_points_precision(self) -> Dict:
         """计算选择点Z方向重复定位精度"""
-        if self.data is None or not all(col in self.data.columns for col in ['Depth_mm', 'Point_ID']):
+        if self.filtered_data is None or not all(col in self.filtered_data.columns for col in ['Depth_mm', 'Point_ID']):
             return {'error': '数据格式不正确，需要Z、Point_ID列'}
         
         # 按Point_ID分组计算Z方向精度
         point_precisions = []
         point_numbers = []
         
-        for point_id in self.data['Point_ID'].unique():
-            point_data = self.data[self.data['Point_ID'] == point_id]
+        for point_id in self.filtered_data['Point_ID'].unique():
+            point_data = self.filtered_data[self.filtered_data['Point_ID'] == point_id]
             if len(point_data) > 1:  # 至少需要2个数据点
                 point_z_std = point_data['Depth_mm'].std()
                 point_z_mean = point_data['Depth_mm'].mean()
@@ -203,7 +245,7 @@ class ExcelPrecisionCalculator:
     
     def generate_plots(self, output_dir: str = "precision_analysis"):
         """生成Z方向分析图表"""
-        if self.data is None:
+        if self.filtered_data is None:
             print("没有数据可生成图表")
             return
         
@@ -223,7 +265,7 @@ class ExcelPrecisionCalculator:
             plt.axhline(y=self.results['mean_z'], color='r', linestyle='--', alpha=0.8, label=f'平均值: {self.results["mean_z"]:.3f} mm')
             plt.xlabel('Measurement_Index')
             plt.ylabel('Z坐标 (mm)')
-            plt.title('中心点Z方向轨迹')
+            plt.title(f'中心点Z方向轨迹（1000mm内）')
             plt.grid(True, alpha=0.3)
             plt.legend()
             plt.tight_layout()
@@ -242,7 +284,7 @@ class ExcelPrecisionCalculator:
                 plt.text(0, 1, f'{z_deviations[0]:.3f}', ha='center', va='bottom')
             plt.xlabel('Z方向偏差 (mm)')
             plt.ylabel('频次')
-            plt.title('Z方向偏差分布')
+            plt.title(f'Z方向偏差分布（1000mm内）')
             plt.grid(True, alpha=0.3)
             plt.axvline(x=0, color='r', linestyle='--', alpha=0.8)
             plt.tight_layout()
@@ -259,7 +301,7 @@ class ExcelPrecisionCalculator:
             bars = plt.bar(point_ids, max_deviations_z, alpha=0.7, edgecolor='black', color='lightcoral')
             plt.xlabel('Point_ID')
             plt.ylabel('Z方向最大偏差 (mm)')
-            plt.title('各选择点Z方向最大偏差对比')
+            plt.title(f'各选择点Z方向最大偏差对比（1000mm内）')
             plt.grid(True, alpha=0.3)
             
             # 添加数值标签
@@ -281,7 +323,7 @@ class ExcelPrecisionCalculator:
             bars = plt.bar(point_ids, std_deviations_z, alpha=0.7, edgecolor='black', color='lightgreen')
             plt.xlabel('Point_ID')
             plt.ylabel('Z方向标准差 (mm)')
-            plt.title('各选择点Z方向标准差对比')
+            plt.title(f'各选择点Z方向标准差对比（1000mm内）')
             plt.grid(True, alpha=0.3)
             
             # 添加数值标签
@@ -305,14 +347,26 @@ class ExcelPrecisionCalculator:
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write("# Excel表格Z方向重复定位精度分析报告\n\n")
             f.write(f"分析时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"数据文件: {self.excel_file}\n\n")
+            f.write(f"数据文件: {self.excel_file}\n")
+            f.write(f"距离阈值: {self.max_distance_mm} mm\n\n")
+            
+            # 距离过滤说明
+            f.write("## 距离过滤说明\n\n")
+            f.write(f"本分析仅包含距离原点{self.max_distance_mm}mm内的点，以提高精度分析的可靠性。\n")
+            if self.data is not None and self.filtered_data is not None:
+                f.write(f"- 原始数据点数: {len(self.data)}\n")
+                f.write(f"- 过滤后点数: {len(self.filtered_data)}\n")
+                f.write(f"- 数据保留比例: {len(self.filtered_data)/len(self.data)*100:.1f}%\n\n")
             
             # 数据结构
             if 'data_structure' in self.results:
                 f.write("## 数据结构\n\n")
-                f.write(f"- 总行数: {self.results['data_structure']['total_rows']}\n")
+                f.write(f"- 原始总行数: {self.results['data_structure']['original_rows']}\n")
+                f.write(f"- 过滤后行数: {self.results['data_structure']['total_rows']}\n")
                 f.write(f"- 帧数: {self.results['data_structure']['frame_count']}\n")
-                f.write(f"- 每帧点数: {self.results['data_structure']['point_count']}\n\n")
+                f.write(f"- 每帧点数: {self.results['data_structure']['point_count']}\n")
+                f.write(f"- 包含坐标: {self.results['data_structure']['has_coordinates']}\n")
+                f.write(f"- 距离阈值: {self.results['data_structure']['max_distance_threshold']} mm\n\n")
             
             # 中心点Z方向精度
             if 'center_point' in self.results:
@@ -391,15 +445,16 @@ def main():
     parser = argparse.ArgumentParser(description='Excel表格Z方向重复定位精度分析程序')
     parser.add_argument('--excel_file',  default='./test_results/repeatability_test_1756095727.xlsx',help='Excel文件路径')
     parser.add_argument('--output-dir', default='precision_analysis', help='输出目录')
+    parser.add_argument('--max-distance', type=float, default=1000.0, help='最大距离阈值（毫米），只分析此距离内的点')
     
     args = parser.parse_args()
     
     # 创建计算器并运行分析
-    calculator = ExcelPrecisionCalculator(args.excel_file)
+    calculator = ExcelPrecisionCalculator(args.excel_file, args.max_distance)
     results = calculator.run_analysis()
     
     if results:
-        print("\n=== Z方向分析摘要 ===")
+        print("\n=== Z方向分析摘要（1000mm内） ===")
         if 'center_point' in results:
             max_dev_z = results['center_point']['max_deviation_z']
             print(f"Z方向重复定位精度: {max_dev_z:.3f} mm")
@@ -407,6 +462,8 @@ def main():
         if 'selected_points' in results:
             mean_dev_z = results['selected_points']['mean_max_deviation_z']
             print(f"选择点Z方向平均精度: {mean_dev_z:.3f} mm")
+        
+        print(f"注意：以上结果仅基于距离原点{args.max_distance}mm内的点计算得出")
 
 
 if __name__ == "__main__":
